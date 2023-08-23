@@ -1,0 +1,775 @@
+import ai.djl.inference.Predictor
+import ai.djl.modality.Classifications
+import ai.djl.modality.cv.Image
+import ai.djl.modality.cv.ImageFactory
+import ai.djl.modality.cv.transform.CenterCrop
+import ai.djl.modality.cv.transform.Normalize
+import ai.djl.modality.cv.transform.Resize
+import ai.djl.modality.cv.transform.ToTensor
+import ai.djl.modality.cv.translator.ImageClassificationTranslator
+import ai.djl.repository.zoo.Criteria
+import ai.djl.repository.zoo.ZooModel
+import ai.djl.training.util.ProgressBar
+import ai.djl.translate.Translator
+import groovy.transform.builder.Builder
+import javafx.scene.control.TableColumn
+import javafx.scene.control.TableView
+import javafx.scene.control.cell.PropertyValueFactory
+import javafx.scene.layout.VBox
+import qupath.lib.gui.dialogs.Dialogs
+import com.mathworks.engine.MatlabEngine
+
+import java.util.concurrent.ExecutionException
+
+import java.nio.file.Paths
+
+String projectPath = "_THIS FILE LOCATION_"
+String modelDirectory = projectPath + "/ai-model/resnet18.pt"
+String imagePath = Dialogs.promptForFile(null).absolutePath
+println("Absolute Path: " + imagePath)
+Translator<Image, Classifications> translator = ImageClassificationTranslator.builder()
+        .addTransform(new Resize(256))
+        .addTransform(new CenterCrop(224, 224))
+        .addTransform(new ToTensor())
+        .addTransform(new Normalize(
+                new float[] {0.485f, 0.456f, 0.406f},
+                new float[] {0.229f, 0.224f, 0.225f}))
+        .optApplySoftmax(true)
+        .build()
+Criteria<Image, Classifications> criteria = Criteria.builder()
+        .setTypes(Image.class, Classifications.class)
+        .optModelPath(Paths.get(modelDirectory))
+        .optOption("mapLocation", "true") // this model requires mapLocation for GPU
+        .optTranslator(translator)
+        .optProgress(new ProgressBar()).build();
+println("Invoking Load Model Started...");
+
+ZooModel<Image, Classifications> model = criteria.loadModel();
+System.out.println("Invoked Load Model");
+
+File image  = Paths.get(imagePath).toFile();
+FileInputStream fos = new FileInputStream(image);
+Image img_1 = ImageFactory.getInstance().fromInputStream(fos);
+//Image img = ImageFactory.getInstance().fromUrl("https://raw.githubusercontent.com/pytorch/hub/master/images/dog.jpg");
+img_1.getWrappedImage();
+
+Predictor<Image, Classifications> predictor = model.newPredictor()
+Classifications classifications = predictor.predict(img_1)
+Double best  = classifications.best().getProbability()
+println("Classification: " + classifications + "\n Classification: " + classifications.best().className + " " + best)
+
+// Matlab Fibrosis Code
+System.out.println("Invoking Start Matlab!");
+MatlabEngine eng = MatlabEngine.startMatlab();
+
+Double fibrosisPresent = 0.0
+if(classifications.best().className.containsIgnoreCase("SR")){
+eng.eval("clc;clear\n" +
+        "proj_folder = '"+projectPath+"';\n" +
+        "addpath(genpath(proj_folder))\n" +
+        "FName = '"+imagePath+"';  ");
+eng.eval("CFile=imread(FName);\n" +
+        "\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "gray_CFile=rgb2gray(CFile);\n" +
+        "idx0=find(gray_CFile>240);\n" +
+        "idx1=find(gray_CFile<=240);\n" +
+        "gray_Mask=false(size(gray_CFile));\n" +
+        "gray_Mask(idx1)=1;\n" +
+        "gray_Mask=bwareaopen(gray_Mask,5000);\n" +
+        "%imshow(gray_Mask,[])\n" +
+        "RP=regionprops(gray_Mask,'Centroid','PixelList','BoundingBox');\n" +
+        "for ii=1:size(RP,1)\n" +
+        "    Cx=RP(ii).Centroid(1);\n" +
+        "    Cy=RP(ii).Centroid(2);\n" +
+        "    OBJ(ii,1)=round(Cx);\n" +
+        "end\n" +
+        "\n" +
+        "[minV minIDX]=min(OBJ);\n" +
+        "BBox=round(RP(minIDX).BoundingBox);\n" +
+        "CFile=imcrop(CFile,BBox);\n" +
+        "h2=figure('Name','Fibrosis detection Window','NumberTitle','off')\n" +
+        "\n" +
+        "h2;subplot(221);imshow(CFile,[]); title('Original Image')\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "BWFile=im2bw(CFile,graythresh(CFile(:,:,1)));\n" +
+        "BWFile=imcomplement(BWFile);\n" +
+        "%figure(1);subplot(222);imshow(BWFile,[]);title('BW')\n" +
+        "BWFilledHoles=imfill(BWFile,'holes');\n" +
+        "BWFilledHoles=bwareaopen(BWFilledHoles,500000);\n" +
+        "h2;subplot(222);imshow(BWFilledHoles,[]);title('Cleaned Samples Mask')\n" +
+        "\n" +
+        "OriginalSegmented=CFile.*uint8(BWFilledHoles);\n" +
+        "h2;subplot(223);imshow(OriginalSegmented,[]);title('Segmented Samples Image')\n" +
+        "\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "k=4;\n" +
+        "CM=[0 0 0;\n" +
+        "    1 0 0;\n" +
+        "    0 1 0;\n" +
+        "    0 0 1];\n" +
+        "\n" +
+        "[mu,KMSegmented]=kmeanss(im2gray(OriginalSegmented),k);\n" +
+        "h2;subplot(224);imagesc(KMSegmented);title('Clustered Image data') ;colormap(CM);colorbar;\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "idxBlack=find(KMSegmented==1);\n" +
+        "idxRed=find(KMSegmented==2);\n" +
+        "idxGreen=find(KMSegmented==3);\n" +
+        "idxBlue=find(KMSegmented==4);\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "RedMask=false(size(KMSegmented));\n" +
+        "RedMask(idxRed)=1;\n" +
+        "RedImage=uint8(RedMask) .* OriginalSegmented;\n" +
+        "\n" +
+        "FibrosisCount=0;\n" +
+        "TH=1\n" +
+        "for j=1:size(RedImage,1)\n" +
+        "    for k=1:size(RedImage,2)\n" +
+        "        r=RedImage(j,k,1);\n" +
+        "        g=RedImage(j,k,2);\n" +
+        "        b=RedImage(j,k,3);\n" +
+        "        if r-(g+b)>TH;\n" +
+        "            RedImage(j,k,1)=RedImage(j,k,1)+200;\n" +
+        "            RedImage(j,k,2)=0;\n" +
+        "            RedImage(j,k,3)=0;\n" +
+        "            FibrosisCount=FibrosisCount+1;\n" +
+        "        end\n" +
+        "\n" +
+        "    end\n" +
+        "end\n" +
+        "\n" +
+        "\n" +
+        "FibrosisPresent=(FibrosisCount/[length(idxRed)+length(idxGreen)+length(idxBlue)])*100;\n" +
+        "OC=bwconncomp(BWFilledHoles)\n" +
+        "%FibrosisPresent=FibrosisPresent/OC.NumObjects\n" +
+        "h3=figure('Name','Fibrosis Visualization','NumberTitle','off')\n" +
+        "h3;subplot(121);\n" +
+        "imagesc(CFile);title(strrep(FName,'_','-'))\n" +
+        "h3;subplot(122)\n" +
+        "imagesc(RedImage);title(['Fibrosis Detection ---%',num2str(FibrosisPresent)]);\n" +
+        "\n" +
+        "\n" +
+        "if FibrosisPresent>1.5\n" +
+        "    imgtype=\"TREATED\"\n" +
+        "else\n" +
+        "    \n" +
+        "    imgtype=\"CONTROL\"\n" +
+        "end\n" +
+        "\n" +
+        "\n" +
+        "Category=imgtype;\n")
+        fibrosisPresent =  eng.getVariable("FibrosisPresent")
+}
+System.out.println("Fibrosis Present Percentage: " + fibrosisPresent);
+
+// Myocytes 
+println('Invoking Myocytes Script...')
+eng.eval("clc;clear\n" +
+        "proj_folder = '"+projectPath+"';\n" +
+        "addpath(genpath(proj_folder))\n" +
+        "FName = '"+imagePath+"';  ");
+eng.eval("CFile=imread(FName);\n" +
+        "\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "gray_CFile=rgb2gray(CFile);\n" +
+        "\n" +
+        "idx0=find(gray_CFile>200);\n" +
+        "idx1=find(gray_CFile<=200);\n" +
+        "\n" +
+        "gray_Mask=false(size(gray_CFile));\n" +
+        "gray_Mask(idx1)=1;\n" +
+        "gray_Mask=imfill(gray_Mask,'holes');\n" +
+        "gray_Mask=bwareaopen(gray_Mask,5000);\n" +
+        "\n" +
+        "RP=regionprops(gray_Mask,'Centroid','PixelList','BoundingBox','Area');\n" +
+        "for ii=1:size(RP,1)\n" +
+        "    Cx=RP(ii).Centroid(1);\n" +
+        "    Cy=RP(ii).Centroid(2);\n" +
+        "    OBJ(ii,1)=round(Cx);\n" +
+        "    Sz(ii)=RP(ii).Area;\n" +
+        "end\n" +
+        "\n" +
+        "[maxV maxIDX]=max(Sz);\n" +
+        "\n" +
+        "BBox=round(RP(maxIDX).BoundingBox);\n" +
+        "gray_Mask=imcrop(gray_Mask,BBox);\n" +
+        "CFile=imcrop(CFile,BBox);\n" +
+        "gray_Mask=bwareaopen(gray_Mask,50000);\n" +
+        "\n" +
+        "RP2=regionprops(gray_Mask,'Area','PixelIdxList');\n" +
+        "[~, indexOfLargestObject] = max([RP2.Area]);\n" +
+        "LargestobjectPixels=RP2(indexOfLargestObject).PixelIdxList;\n" +
+        "\n" +
+        "gray_Mask2=false(size(gray_Mask));\n" +
+        "gray_Mask2(LargestobjectPixels)=1;\n" +
+        "gray_Mask=gray_Mask2; clear gray_Mask2;\n" +
+        "\n" +
+        "\n" +
+        "CFile= CFile .* uint8(gray_Mask);\n" +
+        "\n" +
+        "%figure(10);imshow(CFile,[]); title('Original Image')\n" +
+        "\n" +
+        "clear BBox RP RP2 maxIDX gray_Mask Sz\n" +
+        "\n" +
+        "\n" +
+        "\n" +
+        "hsvImage = rgb2hsv(CFile);\n" +
+        "% Extract the H, S, and V channels from the HSV image\n" +
+        "hueChannel = hsvImage(:,:,1);\n" +
+        "saturationChannel = hsvImage(:,:,2);\n" +
+        "valueChannel = hsvImage(:,:,3);\n" +
+        "% Define the threshold values for purple hue (adjust these values as needed)\n" +
+        "lowerHueThreshold = 0.7;   % Lower bound of purple hue\n" +
+        "upperHueThreshold = 0.85;  % Upper bound of purple hue\n" +
+        "% Create a binary mask for the purple hue range\n" +
+        "purpleMask = (hueChannel >= lowerHueThreshold) & (hueChannel <= upperHueThreshold);\n" +
+        "% Enhance the saturation for purple pixels to intensify the purple color\n" +
+        "saturationFactor = 5.5;  % Adjust this factor to control the saturation enhancement\n" +
+        "enhancedSaturation = saturationChannel;\n" +
+        "enhancedSaturation(purpleMask) = saturationChannel(purpleMask) * saturationFactor;\n" +
+        "% Combine the enhanced saturation with the original hue and value channels\n" +
+        "enhancedHsvImage = hsvImage;\n" +
+        "enhancedHsvImage(:,:,2) = enhancedSaturation;\n" +
+        "% Convert the enhanced HSV image back to RGB\n" +
+        "enhancedRgbImage = hsv2rgb(enhancedHsvImage);\n" +
+        "% Display the original and the enhanced images side by side\n" +
+        "\n" +
+        "h7=figure('Name','Long tissues distortions','NumberTitle','off');\n" +
+        "imshow(enhancedRgbImage);\n" +
+        "title(['Enhanced Purple shade....',strrep(FName,'_','-')])\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "\n" +
+        "\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "%figure(111);\n" +
+        "inputImage=CFile;\n" +
+        "%imshow(inputImage,[]);title(\"Original H&E Image\")\n" +
+        "%inputImage=inputImage(:,:,1);\n" +
+        "\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "R=size(inputImage,1);\n" +
+        "C=size(inputImage,2);\n" +
+        "Rstops=linspace(1,R,5);Rdiff=round(Rstops(2)-Rstops(1));\n" +
+        "Cstops=round(linspace(1,C,5));Cdiff=round(Cstops(2)-Cstops(1));\n" +
+        "nm=0\n" +
+        "NumClasses=4\n" +
+        "for i=1:length(Rstops)-1\n" +
+        "    for j=1:length(Cstops)-1\n" +
+        "        rows=round(Rstops(i):Rstops(i)+Rdiff-1);\n" +
+        "        cols=round(Cstops(j):Cstops(j)+Cdiff-1);\n" +
+        "        nm=nm+1;\n" +
+        "        cimage=inputImage(rows,cols,:);\n" +
+        "        %figure(112);subplot(4,4,nm);imshow(cimage,[]);\n" +
+        "        aa(:,:,:,nm)=cimage;\n" +
+        "        [L,Centers] = imsegkmeans((cimage),NumClasses);\n" +
+        "        %figure(113);subplot(4,4,nm);imagesc(L);colorbar;\n" +
+        "        seg(:,:,:,nm)=L;\n" +
+        "\n" +
+        "    end\n" +
+        "end\n" +
+        "\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "\n" +
+        "h8=figure('Name','Segmentation of Pathological Image','NumberTitle','off');\n" +
+        " for i=7\n" +
+        "     realimg=aa(:,:,:,i);\n" +
+        "     segimg=seg(:,:,:,i);\n" +
+        "     %figure(111);imagesc(realimg);colorbar;title(['Image block...', num2str(i)])\n" +
+        "     %h7;imagesc(segimg);colorbar;\n" +
+        "     %pause(0.5);\n" +
+        "\n" +
+        "   \n" +
+        "    s1=false(size(segimg));s1(segimg==1)=1;s1=imfill(s1,'holes');\n" +
+        "    s2=false(size(segimg));s2(segimg==2)=1;\n" +
+        "    s3=false(size(segimg));s3(segimg==3)=1;\n" +
+        "    s4=false(size(segimg));s4(segimg==4)=1;\n" +
+        "\n" +
+        "    h8;subplot(221);imshow(s1,[]);title(' Dark Blue/ Purple Dots --Nuclie')\n" +
+        "    h8;subplot(222);imshow(s2,[]);title(' Light Pink/white Background')\n" +
+        "    h8;subplot(223);imshow(s3,[]);title(' Light Pink Tissues containing Nuclie')\n" +
+        "    h8;subplot(224);imshow(s4,[]);title(' Dark Pink Heart Tissues')\n" +
+        "\n" +
+        "  \n" +
+        "\n" +
+        "    \n" +
+        "end\n" +
+        "\n" +
+        "\n" +
+        "\n" +
+        "\n" +
+        "I=realimg(:,:,1);\n" +
+        "B = fibermetric(I,5,'ObjectPolarity','dark');\n" +
+        "\n" +
+        "B2=im2bw(B,graythresh(B));\n" +
+        "B3=imfill(B2,'holes');\n" +
+        "\n" +
+        "\n" +
+        "labeledImage = bwlabel(B3);\n" +
+        "props = regionprops(labeledImage, 'Area', 'Solidity', 'Eccentricity');\n" +
+        "\n" +
+        "% Step 3: Filter objects based on properties\n" +
+        "minAreaThreshold = 100; % Adjust as needed\n" +
+        "minSolidityThreshold = 0.5; % Adjust as needed\n" +
+        "maxEccentricity = 0.99; % Adjust as needed\n" +
+        "\n" +
+        "solidObjects = [];\n" +
+        "for ii = 1:length(props)\n" +
+        "    area = props(ii).Area;\n" +
+        "    solidity = props(ii).Solidity;\n" +
+        "    eccentricity = props(ii).Eccentricity;\n" +
+        "    \n" +
+        "    if area >= minAreaThreshold && solidity >= minSolidityThreshold && eccentricity <= maxEccentricity\n" +
+        "        solidObjects = [solidObjects, ii];\n" +
+        "    end\n" +
+        "end\n" +
+        "\n" +
+        "\n" +
+        "\n" +
+        "h9=figure('Name','Elongate tubular cuts highlighted','NumberTitle','off');\n" +
+        "h9;imagesc(realimg);colorbar;title(['Required Myoctyes found======',num2str(length(solidObjects))])\n" +
+        "hold on\n" +
+        "\n" +
+        "for i = 1:length(solidObjects)\n" +
+        "    boundary = bwboundaries(labeledImage == solidObjects(i));\n" +
+        "    plot(boundary{1}(:, 2), boundary{1}(:, 1), 'r', 'LineWidth', 2);\n" +
+        "end\n" +
+        "\n" +
+        "hold off;\n" +
+        "disp( ['Elongated Myocytes found======',num2str(length(solidObjects))])\n" +
+        "\n" +
+        "myoctyesFound=length(solidObjects)\n" +
+        "\n");
+def myoctyesCount = eng.getVariable("myoctyesFound").toString();
+
+// Blood Cells
+println('Invoking Blood Cells Script...')
+eng.eval("clc;clear\n" +
+        "proj_folder = '"+projectPath+"';\n" +
+        "addpath(genpath(proj_folder))\n" +
+        "FName = '"+imagePath+"';  ");
+eng.eval("    %FName='DQ8_ML00637_HE_1.jpg';\n" +
+        "   % FName='DQ8EO1_3HE.jpg'\n" +
+        "    CFile=imread(FName);\n" +
+        "\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "gray_CFile=rgb2gray(CFile);\n" +
+        "\n" +
+        "idx0=find(gray_CFile>200);\n" +
+        "idx1=find(gray_CFile<=200);\n" +
+        "\n" +
+        "gray_Mask=false(size(gray_CFile));\n" +
+        "gray_Mask(idx1)=1;\n" +
+        "gray_Mask=imfill(gray_Mask,'holes');\n" +
+        "gray_Mask=bwareaopen(gray_Mask,5000);\n" +
+        "\n" +
+        "RP=regionprops(gray_Mask,'Centroid','PixelList','BoundingBox','Area');\n" +
+        "for ii=1:size(RP,1)\n" +
+        "    Cx=RP(ii).Centroid(1);\n" +
+        "    Cy=RP(ii).Centroid(2);\n" +
+        "    OBJ(ii,1)=round(Cx);\n" +
+        "    Sz(ii)=RP(ii).Area;\n" +
+        "end\n" +
+        "\n" +
+        "[maxV maxIDX]=max(Sz);\n" +
+        "\n" +
+        "BBox=round(RP(maxIDX).BoundingBox);\n" +
+        "gray_Mask=imcrop(gray_Mask,BBox);\n" +
+        "CFile=imcrop(CFile,BBox);\n" +
+        "gray_Mask=bwareaopen(gray_Mask,50000);\n" +
+        "\n" +
+        "RP2=regionprops(gray_Mask,'Area','PixelIdxList');\n" +
+        "[~, indexOfLargestObject] = max([RP2.Area]);\n" +
+        "LargestobjectPixels=RP2(indexOfLargestObject).PixelIdxList;\n" +
+        "\n" +
+        "gray_Mask2=false(size(gray_Mask));\n" +
+        "gray_Mask2(LargestobjectPixels)=1;\n" +
+        "gray_Mask=gray_Mask2; clear gray_Mask2;\n" +
+        "\n" +
+        "\n" +
+        "CFile= CFile .* uint8(gray_Mask);\n" +
+        "\n" +
+        "h1=figure('Name','Blood Clot Detections','NumberTitle','off')\n" +
+        "subplot(121);imshow(CFile,[]); title(strrep(FName,'_','-'))\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "\n" +
+        "grayCFile=im2gray(CFile);\n" +
+        "SideBloodMask=false(size(grayCFile));\n" +
+        "BloodTH=80;\n" +
+        "idx0=(find(grayCFile<=BloodTH));\n" +
+        "SideBloodMask(idx0)=1;\n" +
+        "%figure();imshow(CFile,[])\n" +
+        "%figure();imshow(SideBloodMask,[])\n" +
+        "SideBloodMask=bwareaopen(SideBloodMask,100);\n" +
+        "SideBloodMask=imfill(SideBloodMask,'holes');\n" +
+        "BloodImg=grayCFile .* uint8(SideBloodMask);\n" +
+        "h1;subplot(122);imshow(BloodImg,[]); colormap(hot); \n" +
+        "\n" +
+        "h1; subplot(122);hold on;contour(SideBloodMask, [0.5 0.5], '-g', 'LineWidth', 3); % Draw red contours for label = 1\n" +
+        "\n" +
+        "ssd=bwconncomp(SideBloodMask);\n" +
+        "for j=1:ssd.NumObjects\n" +
+        "    SZ(j)=length(ssd.PixelIdxList{j});\n" +
+        "end\n" +
+        "\n" +
+        "max(SZ)\n" +
+        "title(['Blood Objects =',num2str(ssd.NumObjects), ',    Largest clot =',num2str(max(SZ)), ' Pixels'])\n" +
+        "largestClotSize=max(SZ);\n" +
+        "% SideBloodMask\n");
+
+println("Largest Clot Size In Pixels: " + eng.getVariable("largestClotSize"));
+//println("Side Blood Mask: " + eng.getVariable("SideBloodMask"));
+
+def largestClotSizeInPixels = eng.getVariable("largestClotSize").toString()
+//def sideBloodMaskCount = eng.getVariable("SideBloodMask").toString()
+
+// HE Parameters
+eng.eval("clc;clear\n" +
+        "proj_folder = '"+projectPath+"';\n" +
+        "addpath(genpath(proj_folder))\n" +
+        "FName = '"+imagePath+"';  ");
+eng.eval("CFile=imread(FName);\n" +
+        "\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "gray_CFile=rgb2gray(CFile);\n" +
+        "\n" +
+        "idx0=find(gray_CFile>200);\n" +
+        "idx1=find(gray_CFile<=200);\n" +
+        "\n" +
+        "gray_Mask=false(size(gray_CFile));\n" +
+        "gray_Mask(idx1)=1;\n" +
+        "gray_Mask=imfill(gray_Mask,'holes');\n" +
+        "gray_Mask=bwareaopen(gray_Mask,5000);\n" +
+        "\n" +
+        "RP=regionprops(gray_Mask,'Centroid','PixelList','BoundingBox','Area');\n" +
+        "for ii=1:size(RP,1)\n" +
+        "    Cx=RP(ii).Centroid(1);\n" +
+        "    Cy=RP(ii).Centroid(2);\n" +
+        "    OBJ(ii,1)=round(Cx);\n" +
+        "    Sz(ii)=RP(ii).Area;\n" +
+        "end\n" +
+        "\n" +
+        "[maxV maxIDX]=max(Sz);\n" +
+        "\n" +
+        "BBox=round(RP(maxIDX).BoundingBox);\n" +
+        "gray_Mask=imcrop(gray_Mask,BBox);\n" +
+        "CFile=imcrop(CFile,BBox);\n" +
+        "gray_Mask=bwareaopen(gray_Mask,50000);\n" +
+        "\n" +
+        "RP2=regionprops(gray_Mask,'Area','PixelIdxList');\n" +
+        "[~, indexOfLargestObject] = max([RP2.Area]);\n" +
+        "LargestobjectPixels=RP2(indexOfLargestObject).PixelIdxList;\n" +
+        "\n" +
+        "gray_Mask2=false(size(gray_Mask));\n" +
+        "gray_Mask2(LargestobjectPixels)=1;\n" +
+        "gray_Mask=gray_Mask2; clear gray_Mask2;\n" +
+        "\n" +
+        "\n" +
+        "CFile= CFile .* uint8(gray_Mask);\n" +
+        "\n" +
+        "%figure(10);imshow(CFile,[]); title('Original Image')\n" +
+        "\n" +
+        "clear BBox RP RP2 maxIDX gray_Mask Sz\n" +
+        "\n" +
+        "\n" +
+        "\n" +
+        "hsvImage = rgb2hsv(CFile);\n" +
+        "% Extract the H, S, and V channels from the HSV image\n" +
+        "hueChannel = hsvImage(:,:,1);\n" +
+        "saturationChannel = hsvImage(:,:,2);\n" +
+        "valueChannel = hsvImage(:,:,3);\n" +
+        "% Define the threshold values for purple hue (adjust these values as needed)\n" +
+        "lowerHueThreshold = 0.7;   % Lower bound of purple hue\n" +
+        "upperHueThreshold = 0.85;  % Upper bound of purple hue\n" +
+        "% Create a binary mask for the purple hue range\n" +
+        "purpleMask = (hueChannel >= lowerHueThreshold) & (hueChannel <= upperHueThreshold);\n" +
+        "% Enhance the saturation for purple pixels to intensify the purple color\n" +
+        "saturationFactor = 5.5;  % Adjust this factor to control the saturation enhancement\n" +
+        "enhancedSaturation = saturationChannel;\n" +
+        "enhancedSaturation(purpleMask) = saturationChannel(purpleMask) * saturationFactor;\n" +
+        "% Combine the enhanced saturation with the original hue and value channels\n" +
+        "enhancedHsvImage = hsvImage;\n" +
+        "enhancedHsvImage(:,:,2) = enhancedSaturation;\n" +
+        "% Convert the enhanced HSV image back to RGB\n" +
+        "enhancedRgbImage = hsv2rgb(enhancedHsvImage);\n" +
+        "% Display the original and the enhanced images side by side\n" +
+        "\n" +
+        "%figure(1);\n" +
+        "h4=figure('Name','HE Parameters Detection','NumberTitle','off')\n" +
+        "imshow(enhancedRgbImage);\n" +
+        "title('Enhanced Purple Color');\n" +
+        "title(strrep(FName,'_','-'))\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "\n" +
+        "\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "%figure(111);\n" +
+        "%inputImage=CFile;\n" +
+        "%imshow(inputImage,[]);title(\"Original H&E Image\");title(' Input Image with Enhanced Purple Shade')\n" +
+        "%inputImage=inputImage(:,:,1);\n" +
+        "\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "R=size(CFile,1);\n" +
+        "C=size(CFile,2);\n" +
+        "Rstops=linspace(1,R,5);Rdiff=round(Rstops(2)-Rstops(1));\n" +
+        "Cstops=round(linspace(1,C,5));Cdiff=round(Cstops(2)-Cstops(1));\n" +
+        "nm=0\n" +
+        "NumClasses=4\n" +
+        "for i=1:length(Rstops)-1\n" +
+        "    for j=1:length(Cstops)-1\n" +
+        "        rows=round(Rstops(i):Rstops(i)+Rdiff-1);\n" +
+        "        cols=round(Cstops(j):Cstops(j)+Cdiff-1);\n" +
+        "        nm=nm+1;\n" +
+        "        cimage=CFile(rows,cols,:);\n" +
+        "        %figure(112);subplot(4,4,nm);imshow(cimage,[]);\n" +
+        "        aa(:,:,:,nm)=cimage;\n" +
+        "        [L,~] = imsegkmeans((cimage),NumClasses);\n" +
+        "        %figure(113);subplot(4,4,nm);imagesc(L);colorbar;\n" +
+        "        seg(:,:,:,nm)=L;\n" +
+        "\n" +
+        "    end\n" +
+        "end\n" +
+        "\n" +
+        "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n" +
+        "NC=0;\n" +
+        "EC=0;\n" +
+        "for i=7\n" +
+        "     realimg=aa(:,:,:,i);\n" +
+        "     segimg=seg(:,:,:,i);\n" +
+        "     h5=figure('Name','HE Parameters Detection','NumberTitle','off');\n" +
+        "     h5;imagesc(realimg);colorbar;title(['Original....', strrep(FName,'_','-')])\n" +
+        "     h6=figure('Name','HE Parameters Detection','NumberTitle','off')\n" +
+        "     h6;imagesc(segimg);colorbar;title([' Segmented....',strrep(FName,'_','-')])\n" +
+        "\n" +
+        "   \n" +
+        "    s1=false(size(segimg));s1(segimg==1)=1;s1=imfill(s1,'holes');\n" +
+        "    s2=false(size(segimg));s2(segimg==2)=1;\n" +
+        "    s3=false(size(segimg));s3(segimg==3)=1;\n" +
+        "    s4=false(size(segimg));s4(segimg==4)=1;\n" +
+        "\n" +
+        "    %figure(113);subplot(221);imshow(s1,[]);title(' Dark Blue/ Purple Dots --Nuclie')\n" +
+        "    %figure(113);subplot(222);imshow(s2,[]);title(' Light Pink/white Background')\n" +
+        "    %figure(113);subplot(223);imshow(s3,[]);title(' Light Pink Tissues containing Nuclie')\n" +
+        "    %figure(113);subplot(224);imshow(s4,[]);title(' Dark Pink Heart Tissues')\n" +
+        "\n" +
+        "    %[centers,radii] = imfindcircles(s1,[100 200],\"ObjectPolarity\",\"bright\",  \"Sensitivity\",0.95,\"Method\",\"twostage\");\n" +
+        "    %h = viscircles(centers,radii);\n" +
+        "\n" +
+        "    \n" +
+        " end\n" +
+        "\n" +
+        "s1=bwareaopen(s1,50);\n" +
+        "s1=imfill(s1,'holes');\n" +
+        "%s1 = bwpropfilt(s1,'solidity',500);\n" +
+        "\n" +
+        "%figure(111);imshow(s1,[]);hold on\n" +
+        "\n" +
+        "stats = regionprops(s1,\"Circularity\",\"Centroid\");\n" +
+        "BB=bwboundaries(s1)\n" +
+        "Nthreshold =0.55;\n" +
+        "\n" +
+        "for k = 1:size(stats,1)\n" +
+        "  thisboundary = BB{k};\n" +
+        "  circ_value = stats(k).Circularity;\n" +
+        "      if circ_value > Nthreshold\n" +
+        "               h5;hold on;plot(thisboundary(:,2),thisboundary(:,1),'.r','MarkerSize',12)\n" +
+        "              CC=stats(k).Centroid;    \n" +
+        "              %figure(112);hold on;plot(CC(1),CC(2),'.g', 'MarkerSize',16)\n" +
+        "              NC=NC+1\n" +
+        "      end\n" +
+        "\n" +
+        "   \n" +
+        "end\n" +
+        "\n" +
+        " [centers,radii] = imfindcircles(s1,[10 20],\"ObjectPolarity\",\"bright\",  \"Sensitivity\",0.99,\"Method\",\"twostage\");\n" +
+        "  h5; h = viscircles(centers,radii);\n" +
+        "\n" +
+        "\n" +
+        "%title(['Automatically Detected Count =========',num2str(NC)])\n" +
+        "\n" +
+        "\n" +
+        "\n" +
+        "\n" +
+        "\n" +
+        "stats = regionprops(s1,\"Circularity\",\"Centroid\");\n" +
+        "BB=bwboundaries(s1)\n" +
+        "Ethreshold =0.1;\n" +
+        "\n" +
+        "for k = 1:size(stats,1)\n" +
+        "  thisboundary = BB{k};\n" +
+        "  circ_value = stats(k).Circularity;\n" +
+        "      if circ_value > Ethreshold && circ_value<Nthreshold\n" +
+        "              h5;hold on;plot(thisboundary(:,2),thisboundary(:,1),'.b','MarkerSize',12)\n" +
+        "                CC=stats(k).Centroid;    \n" +
+        "                EC=EC+1;\n" +
+        "                %figure(112);hold on;plot(CC(1),CC(2),'.b', 'MarkerSize',16)\n" +
+        "      end\n" +
+        "\n" +
+        "   \n" +
+        "end\n" +
+        "\n" +
+        "title(['Normalized Nuclie Count =========',num2str(length(Rstops).^2 *NC), ',', '...Esisophils Count====',num2str(length(Rstops).^2 *EC)])\n" +
+        "\n" +
+        "\n" +
+        "NC = length(Rstops).^2 *NC;\n" +
+        "EC = length(Rstops).^2 *EC;");
+String nucleiCount = eng.getVariable("NC").toString();
+String esisophilsCount = eng.getVariable("EC").toString();
+println("Nuclei Count: " + nucleiCount);
+println("Esisophils Count: " + esisophilsCount);
+
+// Grid For Results
+TableView tableView = new TableView()
+
+def imageNameColumn = new TableColumn<Result, String>("Image Name")
+imageNameColumn.setCellValueFactory(new PropertyValueFactory<>("imageName"))
+
+def controlHEColumn = new TableColumn<Result, String>("Control HE")
+controlHEColumn.setCellValueFactory(new PropertyValueFactory<>("controlHE"))
+
+def controlSRColumn = new TableColumn<Result, String>("Control SR")
+controlSRColumn.setCellValueFactory(new PropertyValueFactory<>("controlSR"))
+
+def treatHEColumn = new TableColumn<Result, String>("Treated HE")
+treatHEColumn.setCellValueFactory(new PropertyValueFactory<>("treatedHE"))
+
+def treatedSRColumn = new TableColumn<Result, String>("Treated SR")
+treatedSRColumn.setCellValueFactory(new PropertyValueFactory<>("treatedSR"))
+
+def fibrosisPresentColumn = new TableColumn<Result, String>("Fibrosis Present")
+fibrosisPresentColumn.setCellValueFactory(new PropertyValueFactory<>("fibrosisPresent"))
+
+def myoctyesCountColumn = new TableColumn<Result, String>("Myoctyes Count")
+myoctyesCountColumn.setCellValueFactory(new PropertyValueFactory<>("myoctyesCount"))
+
+def bloodLargestClotSizeColumn = new TableColumn<Result, String>("Largest Blood Clot Size(PX)")
+bloodLargestClotSizeColumn.setCellValueFactory(new PropertyValueFactory<>("bloodLargestClotSize"))
+
+def nucleiCountColumn = new TableColumn<Result, String>("Nuclei Count")
+nucleiCountColumn.setCellValueFactory(new PropertyValueFactory<>("nucleiCount"))
+
+def esisophilsCountColumn = new TableColumn<Result, String>("Esisophils Count")
+esisophilsCountColumn.setCellValueFactory(new PropertyValueFactory<>("esisophilsCount"))
+
+def columnsList = tableView.getColumns();
+columnsList.addAll(imageNameColumn, controlHEColumn,controlSRColumn,treatHEColumn,treatedSRColumn,fibrosisPresentColumn,myoctyesCountColumn,
+bloodLargestClotSizeColumn,nucleiCountColumn,esisophilsCountColumn)
+
+def tableItems = tableView.getItems();
+
+tableItems.add(Result.builder()
+.imageName(image.getName())
+.controlHE("ControlHE".equalsIgnoreCase(classifications.best().className) ? "Yes" : "No")
+.controlSR("ControlSR".equalsIgnoreCase(classifications.best().className) ? "Yes" : "No")
+.treatedHE("TreatedHE".equalsIgnoreCase(classifications.best().className) ? "Yes" : "No")
+.treatedSR("TreatedSR".equalsIgnoreCase(classifications.best().className) ? "Yes" : "No")
+.fibrosisPresent(fibrosisPresent)
+.myoctyesCount(myoctyesCount)
+.bloodLargestClotSize(largestClotSizeInPixels)
+.nucleiCount(nucleiCount)
+.esisophilsCount(esisophilsCount)
+.build());
+
+VBox vbox = new VBox(tableView)
+Dialogs.showMessageDialog("Table ",vbox)
+
+eng.close();
+System.out.println("Matlab Run Engine Closed!");
+
+@Builder
+class Result {
+    private String imageName;
+    private String controlHE
+    private String controlSR
+    private String treatedHE
+    private String treatedSR
+    private Double fibrosisPresent
+    private String myoctyesCount
+    private String bloodLargestClotSize
+    private String nucleiCount
+    private String esisophilsCount
+
+    String getEsisophilsCount() {
+        return esisophilsCount
+    }
+
+    void setEsisophilsCount(String esisophilsCount) {
+        this.esisophilsCount = esisophilsCount
+    }
+
+    String getNucleiCount() {
+        return nucleiCount
+    }
+
+    void setNucleiCount(String nucleiCount) {
+        this.nucleiCount = nucleiCount
+    }
+
+    String getBloodLargestClotSize() {
+        return bloodLargestClotSize
+    }
+
+    void setBloodLargestClotSize(String bloodLargestClotSize) {
+        this.bloodLargestClotSize = bloodLargestClotSize
+    }
+
+    String getImageName() {
+        return imageName
+    }
+
+    void setImageName(String imageName) {
+        this.imageName = imageName
+    }
+
+    String getControlHE() {
+        return controlHE
+    }
+
+    void setControlHE(String controlHE) {
+        this.controlHE = controlHE
+    }
+
+    String getControlSR() {
+        return controlSR
+    }
+
+    void setControlSR(String controlSR) {
+        this.controlSR = controlSR
+    }
+
+    String getTreatedHE() {
+        return treatedHE
+    }
+
+    void setTreatedHE(String treatedHE) {
+        this.treatedHE = treatedHE
+    }
+
+    String getTreatedSR() {
+        return treatedSR
+    }
+
+    void setTreatedSR(String treatedSR) {
+        this.treatedSR = treatedSR
+    }
+    
+    Double getFibrosisPresent() {
+        return fibrosisPresent
+    }
+
+    void setFibrosisPresent(Double fibrosisPresent) {
+        this.fibrosisPresent = fibrosisPresent
+    }
+    
+     String getMyoctyesCount() {
+        return myoctyesCount
+    }
+
+    void setMyoctyesCount(String myoctyesCount) {
+        this.myoctyesCount = myoctyesCount
+    }
+}
